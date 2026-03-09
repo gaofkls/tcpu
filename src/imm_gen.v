@@ -1,6 +1,6 @@
 module imm_gen (
     input [31:0] instr,
-    input [2:0] immsel,   // 用3位编码足够
+    input [2:0] immsel,
     output reg [31:0] imm
 );
     always @(*) begin
@@ -13,7 +13,7 @@ module imm_gen (
                 imm = { {20{instr[31]}}, instr[7], instr[30:25], instr[11:8], 1'b0 };
             3'b011:  // U-type (lui, auipc)
                 imm = { instr[31:12], 12'h0 };
-            3'b100:  // J-type (jal)
+           3'b100:  // J-type (jal)
                 imm = { {12{instr[31]}}, instr[19:12], instr[20], instr[30:21], 1'b0 };
             default: imm = 32'h0;
         endcase

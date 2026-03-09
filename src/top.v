@@ -14,10 +14,13 @@ module riscv_cpu_simple (
     wire [31:0] write_data;
     wire zero;
     wire br_taken;
-    wire reg_write, alu_src, mem_write, mem_to_reg, branch;
+    wire reg_write, alu_src, mem_write, branch, jal, jalr;
     wire [1:0] alu_op;
     wire [2:0] imm_sel;
     wire [3:0] alu_ctrl;
+    wire [1:0] wb_sel;
+    wire [1:0] alu_a_sel;
+    wire [31:0] alu_a;   // 保持 wire
 
     // PC寄存器
     pc_reg pc_inst (
@@ -48,7 +51,7 @@ module riscv_cpu_simple (
         .imm(imm)
     );
 
-    // 控制单元
+    // 控制单元（新版本，无 mem_to_reg）
     control_unit ctrl_inst (
         .opcode(instr[6:0]),
         .funct3(instr[14:12]),
@@ -56,10 +59,13 @@ module riscv_cpu_simple (
         .reg_write(reg_write),
         .alu_src(alu_src),
         .mem_write(mem_write),
-        .mem_to_reg(mem_to_reg),
         .branch(branch),
+        .jal(jal),
+        .jalr(jalr),
         .alu_op(alu_op),
-        .imm_sel(imm_sel)
+        .imm_sel(imm_sel),
+        .wb_sel(wb_sel),
+        .alu_a_sel(alu_a_sel)
     );
 
     // ALU控制
@@ -70,12 +76,17 @@ module riscv_cpu_simple (
         .alu_ctrl(alu_ctrl)
     );
 
+    // ALU输入a选择（组合逻辑 assign）
+    assign alu_a = (alu_a_sel == 2'b00) ? rs1_data :
+                   (alu_a_sel == 2'b01) ? pc :
+                   (alu_a_sel == 2'b10) ? 32'h0 : 32'h0;
+
     // ALU第二操作数选择
     assign alu_in2 = alu_src ? imm : rs2_data;
 
     // ALU
     alu alu_inst (
-        .a(rs1_data),
+        .a(alu_a),
         .b(alu_in2),
         .alu_ctrl(alu_ctrl),
         .result(alu_result),
@@ -86,13 +97,17 @@ module riscv_cpu_simple (
     dmem dmem_inst (
         .clk(clk),
         .we(mem_write),
-        .addr(alu_result), // 地址为ALU计算结果
+        .addr(alu_result),
         .wdata(rs2_data),
+        .funct3(instr[14:12]),
         .rdata(mem_rdata)
     );
 
-    // 写回数据选择
-    assign write_data = mem_to_reg ? mem_rdata : alu_result;
+    // 写回数据选择（组合逻辑 assign）
+    wire [31:0] pc_plus4 = pc + 4;
+    assign write_data = (wb_sel == 2'b00) ? alu_result :
+                        (wb_sel == 2'b01) ? mem_rdata :
+                        (wb_sel == 2'b10) ? pc_plus4 : 32'h0;
 
     // 分支比较
     branch_compare br_comp (
@@ -103,7 +118,13 @@ module riscv_cpu_simple (
     );
 
     // PC更新逻辑
-    wire [31:0] pc_plus4 = pc + 4;
-    wire [31:0] branch_target = pc + imm; // imm已左移1位
-    assign next_pc = (branch & br_taken) ? branch_target : pc_plus4;
+    wire [31:0] branch_target = pc + imm;          // B型
+    wire [31:0] jal_target = pc + imm;             // J型（已左移1位）
+    wire [31:0] jalr_target = (rs1_data + imm) & ~32'h1; // I型，最低位清零
+
+    wire jump_taken = jal | jalr;
+    wire [31:0] jump_target = jalr ? jalr_target : jal_target;
+
+    assign next_pc = jump_taken ? jump_target :
+                     (branch & br_taken) ? branch_target : pc_plus4;
 endmodule
