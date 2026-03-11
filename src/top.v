@@ -364,26 +364,32 @@ module top (
     wire [31:0] exc_pc = id_ex_pc_plus4 - 4;
     
 
-    // CSR 模块实例化
-     csr csr_inst (
-        .clk(clk),
-        .rst_n(rst_n),
-        .addr(id_ex_csr_addr_reg),
-        .wdata(alu_src1),               // 写数据使用 rs1 的值（已前递）
-        .op(id_ex_csr_op_reg),
-        .we(id_ex_is_csr_reg),
-        .rdata(csr_rdata),
-        .ex_ecall(id_ex_is_ecall_reg),
-        .ex_ebreak(id_ex_is_ebreak_reg),
-        .ex_illegal(1'b0),               // 暂时未处理
-        .ex_mret(id_ex_is_mret_reg),      // 注意：需要连接 ex_mret 信号
-        .current_pc(exc_pc),
-        .trap_taken(csr_take_trap),       // 原 take_trap -> trap_taken
-        .trap_pc(csr_trap_pc),
-        .flush_pipeline(csr_flush),
-        .privilege(csr_privilege),
-        .mepc_value(csr_mepc)
-    );
+// 在EX阶段，根据CSR操作类型选择写数据（立即数版本用rs1_addr，否则用alu_src1）
+wire [31:0] csr_wdata;
+assign csr_wdata = (id_ex_is_csr_reg && id_ex_csr_op_reg[2]) ? {27'b0, id_ex_rs1_addr} : alu_src1;
+
+// CSR 模块实例化（扩展后的版本）
+csr csr_inst (
+    .clk(clk),
+    .rst_n(rst_n),
+    .addr(id_ex_csr_addr_reg),
+    .wdata(csr_wdata),
+    .op(id_ex_csr_op_reg),
+    .we(id_ex_is_csr_reg),
+    .rdata(csr_rdata),
+    .ex_ecall(id_ex_is_ecall_reg),
+    .ex_ebreak(id_ex_is_ebreak_reg),
+    .ex_illegal(1'b0),               // 暂时未处理
+    .ex_mret(id_ex_is_mret_reg),
+    .current_pc(exc_pc),
+    .current_instr(32'h0),            // 暂时接地，待完善
+    .inst_retire(1'b0),                // 暂时不计数
+    .trap_taken(csr_take_trap),
+    .trap_pc(csr_trap_pc),
+    .flush_pipeline(csr_flush),
+    .privilege(csr_privilege),
+    .mepc_value(csr_mepc)
+);
 
     // 跳转控制（整合异常和 mret）
     wire mret_taken = id_ex_is_mret_reg;
