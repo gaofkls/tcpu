@@ -1,6 +1,9 @@
 module top (
     input clk,
     input rst_n,
+    input int_soft,      // 新增
+    input int_timer,     // 新增
+    input int_ext,       // 新增
     output [31:0] pc
 );
     // -------------------- 流水线寄存器信号定义 --------------------
@@ -388,7 +391,10 @@ csr csr_inst (
     .trap_pc(csr_trap_pc),
     .flush_pipeline(csr_flush),
     .privilege(csr_privilege),
-    .mepc_value(csr_mepc)
+    .mepc_value(csr_mepc),
+    .int_soft(int_soft),
+    .int_timer(int_timer),
+    .int_ext(int_ext)
 );
 
     // 跳转控制（整合异常和 mret）

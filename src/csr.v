@@ -1,5 +1,5 @@
 // csr.v
-// 机器模式完整 CSR 实现（支持异常和 mret，增加完整机器模式寄存器）
+// 机器模式完整 CSR 实现（支持异常、mret 和中断）
 module csr (
     input  wire        clk,
     input  wire        rst_n,
@@ -22,10 +22,15 @@ module csr (
     // 指令退休信号（用于 minstret）
     input  wire        inst_retire,   // 指令完成（非气泡、非异常）
 
-    // 异常处理结果
-    output reg         trap_taken,    // 是否发生异常（仅维持一个周期）
-    output wire [31:0] trap_pc,       // 跳转地址（异常时 = mtvec，mret 时 = mepc）
-    output reg         flush_pipeline,// 冲刷流水线（用于异常和 mret）
+    // 中断输入
+    input  wire        int_soft,      // 软件中断（由 CLINT 产生）
+    input  wire        int_timer,     // 定时器中断
+    input  wire        int_ext,       // 外部中断
+
+    // 异常/中断处理结果
+    output reg         trap_taken,    // 是否发生异常或中断（仅维持一个周期）
+    output wire [31:0] trap_pc,       // 跳转地址（异常/中断时 = mtvec，mret 时 = mepc）
+    output reg         flush_pipeline,// 冲刷流水线（用于异常、中断和 mret）
 
     // 当前特权级输出
     output reg  [1:0]  privilege,     // 当前特权级：0=U, 1=S, 3=M
@@ -59,7 +64,7 @@ module csr (
     localparam PRIV_S = 2'b01;
     localparam PRIV_U = 2'b00;
 
-    // 异常原因编码
+    // 异常原因编码（低12位，最高位为0表示异常）
     localparam CAUSE_ECALL_U = 32'h8;
     localparam CAUSE_ECALL_S = 32'h9;
     localparam CAUSE_ECALL_M = 32'hB;
@@ -71,6 +76,11 @@ module csr (
     localparam CAUSE_LOAD_ACCESS    = 32'h5;
     localparam CAUSE_MISALIGN_STORE = 32'h6;
     localparam CAUSE_STORE_ACCESS   = 32'h7;
+
+    // 中断原因编码（最高位为1）
+    localparam INT_SOFT    = 3;  // 机器软件中断
+    localparam INT_TIMER   = 7;  // 机器定时器中断
+    localparam INT_EXT     = 11; // 机器外部中断
 
     // 初始化
     integer i;
@@ -125,7 +135,7 @@ module csr (
                 12'h341: mepc    <= wdata;
                 12'h342: mcause  <= wdata;
                 12'h343: mtval   <= wdata;
-                12'h344: mip     <= wdata;
+                12'h344: mip     <= wdata; // 软件写优先
                 12'hB00: mcycle  <= wdata;
                 12'hB80: mcycleh <= wdata;
                 12'hB02: minstret <= wdata;
@@ -155,57 +165,94 @@ module csr (
         end
     end
 
-    // 异常检测与处理
+    // 更新 mip 寄存器的中断挂起位（软件写优先）
+    always @(posedge clk) begin
+        if (we && addr == 12'h344) begin
+            // 软件写优先，保持原值
+        end else begin
+            mip[INT_SOFT] <= int_soft;
+            mip[INT_TIMER] <= int_timer;
+            mip[INT_EXT]   <= int_ext;
+            // 其他位保持不变
+        end
+    end
+
+    // 组合逻辑：计算当前是否有待处理中断
+    wire soft_pending = mip[INT_SOFT] && mie[INT_SOFT];
+    wire timer_pending = mip[INT_TIMER] && mie[INT_TIMER];
+    wire ext_pending = mip[INT_EXT] && mie[INT_EXT];
+
+    // 中断优先级：外部 > 定时器 > 软件（简单按位优先级）
+    wire int_pending = (ext_pending || timer_pending || soft_pending);
+    wire [31:0] int_cause = ext_pending ? (32'h80000000 | INT_EXT) :
+                            timer_pending ? (32'h80000000 | INT_TIMER) :
+                            soft_pending ? (32'h80000000 | INT_SOFT) : 32'h0;
+
+    // 中断被响应的条件：特权级低于 M 且 MIE 使能（mstatus[3]）
+    wire take_int = int_pending && (privilege < PRIV_M) && mstatus[3];
+
+    // 异常检测
     wire take_exception = ex_ecall || ex_ebreak || ex_illegal;
 
-    reg exception_pending;
-    reg [31:0] exception_cause;
-    reg [31:0] exception_pc;
-    reg [31:0] exception_tval;
+    // 异常/中断总触发（异常优先级高于中断）
+    wire take_trap = take_exception || take_int;
+
+    // 异常/中断处理状态机
+    reg trap_pending;
+    reg [31:0] trap_cause;
+    reg [31:0] trap_pc_val;
+    reg [31:0] trap_tval;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            exception_pending <= 1'b0;
-            trap_taken        <= 1'b0;
-            flush_pipeline    <= 1'b0;
-            trap_pc_reg       <= 32'h0;
+            trap_pending <= 1'b0;
+            trap_taken   <= 1'b0;
+            flush_pipeline <= 1'b0;
+            trap_pc_reg  <= 32'h0;
         end else begin
             // 默认清除脉冲信号
             trap_taken     <= 1'b0;
             flush_pipeline <= 1'b0;
 
-            if (exception_pending) begin
-                // 提交异常：更新 CSR，跳转到 mtvec
+            if (trap_pending) begin
+                // 提交 trap：更新 CSR，跳转到 mtvec
                 trap_taken     <= 1'b1;
                 flush_pipeline <= 1'b1;
                 trap_pc_reg    <= mtvec;
-                mepc    <= exception_pc;
-                mcause  <= exception_cause;
-                mtval   <= exception_tval;
+                mepc    <= trap_pc_val;
+                mcause  <= trap_cause;
+                mtval   <= trap_tval;
                 // 更新 mstatus：保存当前特权级到 MPP，关闭 MIE
                 mstatus <= {mstatus[31:13], privilege, mstatus[10:4], 1'b0, mstatus[2:0]};
-                exception_pending <= 1'b0;
-            end else if (take_exception && !exception_pending) begin
-                // 记录异常，下一周期提交
-                exception_pending <= 1'b1;
-                exception_pc      <= current_pc;
-                if (ex_ecall) begin
-                    case (privilege)
-                        PRIV_U: exception_cause <= CAUSE_ECALL_U;
-                        PRIV_S: exception_cause <= CAUSE_ECALL_S;
-                        PRIV_M: exception_cause <= CAUSE_ECALL_M;
-                        default: exception_cause <= CAUSE_ECALL_M;
-                    endcase
-                    exception_tval <= 32'h0; // ecall 的 mtval 为 0
-                end else if (ex_ebreak) begin
-                    exception_cause <= CAUSE_BREAKPOINT;
-                    exception_tval <= 32'h0;
-                end else if (ex_illegal) begin
-                    exception_cause <= CAUSE_ILLEGAL_INSTR;
-                    exception_tval <= current_instr; // 保存非法指令
+                trap_pending <= 1'b0;
+            end else if (take_trap && !trap_pending) begin
+                // 记录 trap，下一周期提交
+                trap_pending <= 1'b1;
+                trap_pc_val  <= current_pc;
+                if (take_exception) begin
+                    // 异常处理
+                    if (ex_ecall) begin
+                        case (privilege)
+                            PRIV_U: trap_cause <= CAUSE_ECALL_U;
+                            PRIV_S: trap_cause <= CAUSE_ECALL_S;
+                            PRIV_M: trap_cause <= CAUSE_ECALL_M;
+                            default: trap_cause <= CAUSE_ECALL_M;
+                        endcase
+                        trap_tval <= 32'h0;
+                    end else if (ex_ebreak) begin
+                        trap_cause <= CAUSE_BREAKPOINT;
+                        trap_tval <= 32'h0;
+                    end else if (ex_illegal) begin
+                        trap_cause <= CAUSE_ILLEGAL_INSTR;
+                        trap_tval <= current_instr;
+                    end else begin
+                        trap_cause <= 32'h0;
+                        trap_tval <= 32'h0;
+                    end
                 end else begin
-                    exception_cause <= 32'h0;
-                    exception_tval <= 32'h0;
+                    // 中断处理
+                    trap_cause <= int_cause;
+                    trap_tval <= 32'h0;
                 end
             end
         end
@@ -224,7 +271,7 @@ module csr (
                 // 更新 mstatus：MIE = MPIE, MPIE = 1
                 mstatus <= {mstatus[31:8], 1'b1, mstatus[6:4], mstatus[7], mstatus[2:0]};
                 mret_pending <= 1'b0;
-            end else if (ex_mret && !exception_pending) begin
+            end else if (ex_mret && !trap_pending) begin
                 // 检测到 mret，下一周期提交
                 mret_pending <= 1'b1;
             end
