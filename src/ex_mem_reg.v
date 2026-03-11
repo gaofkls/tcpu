@@ -15,6 +15,9 @@ module ex_mem_reg (
     input       branch_taken_i,  // 分支是否实际发生
     input [31:0] branch_target_i,
     input [2:0] funct3_i,        // 用于存储器
+       // 新增输入
+    input  [1:0] wb_sel_i,
+    input [31:0] csr_rdata_i,   // 来自 CSR 模块的输出
     // 输出
     output reg [31:0] pc_plus4_o,
     output reg [31:0] alu_result_o,
@@ -25,7 +28,10 @@ module ex_mem_reg (
     output reg       reg_write_o,
     output reg       branch_taken_o,
     output reg [31:0] branch_target_o,
-    output reg [2:0] funct3_o
+    output reg [2:0] funct3_o,
+       // 新增输出
+    output reg [1:0] wb_sel_o,
+    output reg [31:0] csr_rdata_o
 );
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -39,6 +45,8 @@ module ex_mem_reg (
             branch_taken_o  <= 1'b0;
             branch_target_o <= 32'h0;
             funct3_o        <= 3'b0;
+               wb_sel_o     <= 2'b0;
+        csr_rdata_o  <= 32'b0;
         end else if (flush) begin
             reg_write_o     <= 1'b0;
             mem_write_o     <= 1'b0;
@@ -55,6 +63,8 @@ module ex_mem_reg (
             branch_taken_o  <= branch_taken_i;
             branch_target_o <= branch_target_i;
             funct3_o        <= funct3_i;
+              wb_sel_o     <= wb_sel_i;
+            csr_rdata_o  <= csr_rdata_i;
         end
     end
 endmodule
