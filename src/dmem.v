@@ -6,7 +6,7 @@ module dmem (
     input [2:0] funct3,       // 新增，来自指令的funct3
     output reg [31:0] rdata
 );
-    reg [31:0] mem [0:1023]; // 深度1024
+   reg [31:0] mem [0:4095];   // 扩大为 4096 个字，可寻址到 0x3FFC
 
     // 写操作
     always @(posedge clk) begin

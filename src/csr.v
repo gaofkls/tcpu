@@ -1,5 +1,5 @@
 // csr.v
-// 机器模式和监管者模式 CSR 实现（支持异常、mret、sret，不含中断）
+// 机器模式和监管者模式 CSR 实现（支持异常、mret、sret，以及页错误）
 module csr (
     input  wire        clk,
     input  wire        rst_n,
@@ -17,6 +17,9 @@ module csr (
     input  wire        ex_illegal,    // 当前指令非法
     input  wire        ex_mret,       // 当前指令是 mret
     input  wire        ex_sret,       // 当前指令是 sret
+    input  wire        ex_page_fault, // 页错误异常
+    input  wire [31:0] ex_page_fault_addr, // 出错的虚拟地址
+    input  wire        is_store,      // 是否为 store 操作（用于区分页错误类型）
     input  wire [31:0] current_pc,    // 当前 PC
     input  wire [31:0] current_instr, // 当前指令（用于 mtval）
 
@@ -36,9 +39,10 @@ module csr (
     // 当前特权级输出
     output reg  [1:0]  privilege,     // 当前特权级：0=U, 1=S, 3=M
 
-    // 提供给顶层的 mepc/sepc 值（用于 mret/sret 跳转）
+    // 提供给顶层的 mepc/sepc/satp 值
     output wire [31:0] mepc_value,
-    output wire [31:0] sepc_value
+    output wire [31:0] sepc_value,
+    output wire [31:0] satp_value
 );
 
     // -------------------- CSR 寄存器定义 --------------------
@@ -77,13 +81,14 @@ module csr (
     localparam PRIV_S = 2'b01;
     localparam PRIV_U = 2'b00;
 
-    // 异常原因编码（部分）
+    // 异常原因编码
     localparam CAUSE_ECALL_U = 32'h8;
     localparam CAUSE_ECALL_S = 32'h9;
     localparam CAUSE_ECALL_M = 32'hB;
     localparam CAUSE_BREAKPOINT = 32'h3;
     localparam CAUSE_ILLEGAL_INSTR = 32'h2;
-    // 其他略
+    localparam CAUSE_LOAD_PAGE_FAULT  = 32'hD;  // 13
+    localparam CAUSE_STORE_PAGE_FAULT = 32'hF;  // 15
 
     // 初始化
     integer i;
@@ -152,40 +157,35 @@ module csr (
         if (we) begin
             case (addr)
                 // 机器模式
-              12'h300: if (privilege >= 3) mstatus <= wdata;  // 原 <= PRIV_M
-            12'h301: if (privilege >= 3) misa    <= wdata;
-            12'h304: if (privilege >= 3) mie     <= wdata;
-            12'h305: if (privilege >= 3) mtvec   <= wdata;
-            12'h340: if (privilege >= 3) mscratch <= wdata;
-            12'h341: if (privilege >= 1) mepc    <= wdata;  // 原 <= PRIV_S，M-mode可写
-            12'h342: if (privilege >= 3) mcause  <= wdata;
-            12'h343: if (privilege >= 3) mtval   <= wdata;
-            12'h344: if (privilege >= 3) mip     <= wdata;
-            // 监管者模式
-            12'h100: if (privilege >= 1) sstatus <= wdata;  // M/S可写
-            12'h104: if (privilege >= 1) sie     <= wdata;
-            12'h105: if (privilege >= 1) stvec   <= wdata;
-            12'h140: if (privilege >= 1) sscratch <= wdata;
-            12'h141: if (privilege >= 1) sepc    <= wdata;  // 关键修改
-            12'h142: if (privilege >= 1) scause  <= wdata;
-            12'h143: if (privilege >= 1) stval   <= wdata;
-            12'h144: if (privilege >= 1) sip     <= wdata;
-            12'h180: if (privilege >= 1) satp    <= wdata;  // S-mode可写，M也可写
-            // 性能计数器等
-            12'hB00: if (privilege >= 3) mcycle  <= wdata;
-            12'hB80: if (privilege >= 3) mcycleh <= wdata;
-            12'hB02: if (privilege >= 3) minstret <= wdata;
-            12'hB82: if (privilege >= 3) minstreth <= wdata;
-            12'hF14: if (privilege >= 3) mhartid <= wdata;
+                12'h300: if (privilege >= 3) mstatus <= wdata;
+                12'h301: if (privilege >= 3) misa    <= wdata;
+                12'h304: if (privilege >= 3) mie     <= wdata;
+                12'h305: if (privilege >= 3) mtvec   <= wdata;
+                12'h340: if (privilege >= 3) mscratch <= wdata;
+                12'h341: if (privilege >= 1) mepc    <= wdata;
+                12'h342: if (privilege >= 3) mcause  <= wdata;
+                12'h343: if (privilege >= 3) mtval   <= wdata;
+                12'h344: if (privilege >= 3) mip     <= wdata;
+                // 监管者模式
+                12'h100: if (privilege >= 1) sstatus <= wdata;
+                12'h104: if (privilege >= 1) sie     <= wdata;
+                12'h105: if (privilege >= 1) stvec   <= wdata;
+                12'h140: if (privilege >= 1) sscratch <= wdata;
+                12'h141: if (privilege >= 1) sepc    <= wdata;
+                12'h142: if (privilege >= 1) scause  <= wdata;
+                12'h143: if (privilege >= 1) stval   <= wdata;
+                12'h144: if (privilege >= 1) sip     <= wdata;
+                12'h180: if (privilege >= 1) satp    <= wdata;
+                // 性能计数器等
+                12'hB00: if (privilege >= 3) mcycle  <= wdata;
+                12'hB80: if (privilege >= 3) mcycleh <= wdata;
+                12'hB02: if (privilege >= 3) minstret <= wdata;
+                12'hB82: if (privilege >= 3) minstreth <= wdata;
+                12'hF14: if (privilege >= 3) mhartid <= wdata;
                 default: ;
             endcase
         end
     end
-
-    // 同步 sstatus 和 mstatus 的相关位（可选，这里保持独立）
-    // 实际硬件中 sstatus 是 mstatus 的部分位域，写 sstatus 应修改 mstatus 对应位
-    // 这里简化：让 sstatus 独立，软件需自己同步。但为了正确性，我们可以在读写时映射。
-    // 但先保持简单，后续如果需要再完善。
 
     // 性能计数器递增
     always @(posedge clk or negedge rst_n) begin
@@ -206,8 +206,8 @@ module csr (
         end
     end
 
-    // -------------------- 异常/中断处理（目前只支持异常，中断暂未实现）--------------------
-    wire take_exception = ex_ecall || ex_ebreak || ex_illegal;
+    // -------------------- 异常处理（支持页错误）--------------------
+    wire take_exception = ex_ecall || ex_ebreak || ex_illegal || ex_page_fault;
 
     reg exception_pending;
     reg [31:0] exception_cause;
@@ -228,7 +228,7 @@ module csr (
                 // 提交异常
                 trap_taken     <= 1'b1;
                 flush_pipeline <= 1'b1;
-                trap_pc_reg    <= mtvec;   // 固定进入 M-mode
+                trap_pc_reg    <= mtvec;
                 mepc    <= exception_pc;
                 mcause  <= exception_cause;
                 mtval   <= exception_tval;
@@ -254,6 +254,9 @@ module csr (
                 end else if (ex_illegal) begin
                     exception_cause <= CAUSE_ILLEGAL_INSTR;
                     exception_tval <= current_instr;
+                end else if (ex_page_fault) begin
+                    exception_cause <= is_store ? CAUSE_STORE_PAGE_FAULT : CAUSE_LOAD_PAGE_FAULT;
+                    exception_tval <= ex_page_fault_addr;
                 end else begin
                     exception_cause <= 32'h0;
                     exception_tval <= 32'h0;
@@ -270,38 +273,39 @@ module csr (
         if (!rst_n) begin
             mret_pending <= 1'b0;
             sret_pending <= 1'b0;
-             trap_pc_reg  <= 32'h0; // 复位清零
+            trap_pc_reg  <= 32'h0;
         end else begin
-            // 默认清除脉冲信号
-            flush_pipeline <= 1'b0; // 已在上面被清零，但此处可能覆盖，注意顺序。将 flush 统一放在一个地方。
+            // 注意：flush_pipeline 可能被多个源同时拉高，此处用或逻辑，但为简化，我们分别赋值
+            // 由于异常和 mret/sret 不会同时发生（优先级已处理），可以直接赋值
+            // 但为安全，将 flush_pipeline 的赋值放在各个分支，并用或逻辑合并？此处我们仍采用顺序，异常优先已在上面处理
+            if (mret_pending) begin
+                flush_pipeline <= 1'b1;
+                trap_pc_reg    <= mepc;
+                privilege      <= mstatus[12:11];
+                mstatus        <= {mstatus[31:8], 1'b1, mstatus[6:4], mstatus[7], mstatus[2:0]};
+                mret_pending   <= 1'b0;
+            end else if (ex_mret && !exception_pending && !mret_pending && !sret_pending) begin
+                mret_pending <= 1'b1;
+            end
 
-             if (mret_pending) begin
-            flush_pipeline <= 1'b1;
-            trap_pc_reg    <= mepc;   // 锁存 mepc
-            privilege      <= mstatus[12:11];
-            mstatus        <= {mstatus[31:8], 1'b1, mstatus[6:4], mstatus[7], mstatus[2:0]};
-            mret_pending   <= 1'b0;
-        end else if (ex_mret && !exception_pending && !mret_pending && !sret_pending) begin
-            mret_pending <= 1'b1;
-        end
-
-        if (sret_pending) begin
-            flush_pipeline <= 1'b1;
-            trap_pc_reg    <= sepc;   // 锁存 sepc
-            privilege      <= sstatus[8] ? PRIV_S : PRIV_U;
-            sstatus        <= {sstatus[31:6], 1'b1, sstatus[4:0]};
-            sret_pending   <= 1'b0;
-        end else if (ex_sret && !exception_pending && !mret_pending && !sret_pending) begin
-            sret_pending <= 1'b1;
+            if (sret_pending) begin
+                flush_pipeline <= 1'b1;
+                trap_pc_reg    <= sepc;
+                privilege      <= sstatus[8] ? PRIV_S : PRIV_U;
+                sstatus        <= {sstatus[31:6], 1'b1, sstatus[4:0]};
+                sret_pending   <= 1'b0;
+            end else if (ex_sret && !exception_pending && !mret_pending && !sret_pending) begin
+                sret_pending <= 1'b1;
+            end
         end
     end
-end
 
- // 将 trap_pc 改为寄存器输出
-assign trap_pc = trap_pc_reg;
+    // 返回目标 PC（使用寄存器输出）
+    assign trap_pc = trap_pc_reg;
 
-    // 输出 mepc/sepc 供顶层使用（mret/sret 跳转时）
+    // 输出 mepc/sepc/satp 供顶层使用
     assign mepc_value = mepc;
     assign sepc_value = sepc;
+    assign satp_value = satp;
 
 endmodule
