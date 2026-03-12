@@ -23,7 +23,7 @@ module tb_top;
     always #5 clk = ~clk;
 
     integer cycle = 0;
-    integer i;  // 用于循环
+    integer i;          // 声明用于循环的变量
 
     initial begin
         $dumpfile("wave.vcd");
@@ -44,12 +44,14 @@ module tb_top;
         $display("\n========================================");
         $display("Simulation finished at time %t", $time);
         $display("x28 = 0x%h", u_cpu.reg_inst.regs[28]);
+        $display("privilege = %d", u_cpu.csr_inst.privilege);
+        $display("sstatus = 0x%h", u_cpu.csr_inst.sstatus);
+        $display("sepc = 0x%h", u_cpu.csr_inst.sepc);
+        $display("scause = 0x%h", u_cpu.csr_inst.scause);
 
         #100;
         $display("=== imem content ===");
-        for (i = 0; i < 16; i = i + 1) begin
-            $display("mem[%0d] = %h", i, u_cpu.imem_inst.mem[i]);
-        end
+        for (i=0; i<16; i=i+1) $display("mem[%0d] = %h", i, u_cpu.imem_inst.mem[i]);
 
         if (u_cpu.reg_inst.regs[28] === 32'h5A5)
             $display(">>> TEST PASSED");
@@ -59,15 +61,19 @@ module tb_top;
         $finish;
     end
 
-    // 每个周期打印信息
-    always @(posedge clk) begin
-        cycle = cycle + 1;
-        #1;
-        $display("Cycle %0d: PC=%h, instr=%h", cycle, pc, u_cpu.if_id_instr_reg);
-        $display("  x28=%h, privilege=%d", u_cpu.reg_inst.regs[28], u_cpu.csr_inst.privilege);
-        $display("  mstatus=%h, mepc=%h, mcause=%h",
-                 u_cpu.csr_inst.mstatus, u_cpu.csr_inst.mepc, u_cpu.csr_inst.mcause);
-        if (u_cpu.csr_inst.trap_taken) $display("  >>> trap taken");
-    end
+always @(posedge clk) begin
+    cycle = cycle + 1;
+    #1;
+    $display("  trap_pc=%h", u_cpu.csr_trap_pc);
+    $display("Cycle %0d: PC=%h, instr=%h", cycle, pc, u_cpu.if_id_instr_reg);
+    $display("  x28=%h, privilege=%d", u_cpu.reg_inst.regs[28], u_cpu.csr_inst.privilege);
+    $display("  mtvec=%h, mepc=%h, mcause=%h", u_cpu.csr_inst.mtvec, u_cpu.csr_inst.mepc, u_cpu.csr_inst.mcause);
+    $display("  sstatus=%h, sepc=%h, scause=%h",
+             u_cpu.csr_inst.sstatus, u_cpu.csr_inst.sepc, u_cpu.csr_inst.scause);
+    if (u_cpu.csr_inst.trap_taken) $display("  >>> trap taken");
+    $display("  csr_wdata=%h, we=%b, csr_addr=%h, mscratch=%h",
+             u_cpu.csr_wdata, u_cpu.id_ex_is_csr_reg,
+             u_cpu.id_ex_csr_addr_reg, u_cpu.csr_inst.mscratch);
+end
 
 endmodule

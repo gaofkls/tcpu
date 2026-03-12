@@ -19,7 +19,8 @@ module control_unit (
     output reg is_ecall,
     output reg is_ebreak,
     output reg is_mret,
-    output reg is_csr
+    output reg is_csr,
+    output reg is_sret
 );
 
     always @(*) begin
@@ -41,7 +42,7 @@ module control_unit (
         is_ebreak = 1'b0;
         is_mret   = 1'b0;
         is_csr    = 1'b0;
-
+        is_sret = 1'b0;
         case (opcode)
             7'b0110011: begin // R-type
                 reg_write = 1'b1;
@@ -134,6 +135,8 @@ module control_unit (
                         // mret (0x302)
                         is_mret = 1'b1;
                         // mret 实际上需要跳转，但控制信号保持默认，由 EX 阶段特殊处理
+                          end else if (instr[31:20] == 12'h102) begin
+                        is_sret = 1'b1;
                     end
                     // 其他 funct3=000 且非上述指令的，属于非法指令，这里先不处理
                 end else begin

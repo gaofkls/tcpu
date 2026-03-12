@@ -28,6 +28,7 @@ module top (
     reg         id_ex_is_ecall_reg;
     reg         id_ex_is_ebreak_reg;
     reg         id_ex_is_mret_reg;
+    reg         id_ex_is_sret_reg;        // 新增 sret 标志
 
     // 原有的 ID/EX 寄存器
     reg  [31:0] id_ex_pc_plus4_reg, id_ex_rs1_data_reg, id_ex_rs2_data_reg, id_ex_imm_reg;
@@ -92,7 +93,7 @@ module top (
     wire [1:0] alu_a_sel;
     // 新增 CSR 控制信号
     wire [2:0] csr_op;
-    wire is_ecall, is_ebreak, is_mret, is_csr;
+    wire is_ecall, is_ebreak, is_mret, is_sret, is_csr;   // 新增 is_sret
     wire [2:0] funct3 = if_id_instr_reg[14:12];
 
     // 前递信号
@@ -112,6 +113,7 @@ module top (
     wire        csr_take_trap;
     wire [31:0] csr_trap_pc;
     wire [31:0] csr_mepc;      // 从 CSR 模块输出的 mepc 值，用于 mret
+    wire [31:0] csr_sepc;      // 从 CSR 模块输出的 sepc 值，用于 sret
     wire        csr_flush;      // 异常发生时冲刷流水线
     wire [1:0]  csr_privilege;  // 当前特权级（暂未使用）
 
@@ -133,8 +135,7 @@ module top (
             if_id_pc_plus4_reg <= 32'h0;
             if_id_instr_reg    <= 32'h00000013; // nop
         end else if (!stall_if_id) begin
-            // 注意：此处需要手动合并 flush_if_id 和 csr_flush
-           if (flush_if_id || csr_flush) begin   // <-- 修改点1
+            if (flush_if_id || csr_flush) begin
                 if_id_pc_plus4_reg <= 32'h0;
                 if_id_instr_reg    <= 32'h00000013;
             end else begin
@@ -165,12 +166,12 @@ module top (
         .imm(imm)
     );
 
-    // 控制单元（已扩展支持 CSR）
+    // 控制单元（已扩展支持 CSR 和 sret）
     control_unit ctrl_inst (
         .opcode(if_id_instr[6:0]),
         .funct3(if_id_instr[14:12]),
         .funct7(if_id_instr[31:25]),
-        .instr(if_id_instr),                // 传入完整指令以区分 ecall/ebreak
+        .instr(if_id_instr),                // 传入完整指令以区分 ecall/ebreak/mret/sret
         .reg_write(reg_write),
         .alu_src(alu_src),
         .mem_write(mem_write),
@@ -187,6 +188,7 @@ module top (
         .is_ecall(is_ecall),
         .is_ebreak(is_ebreak),
         .is_mret(is_mret),
+        .is_sret(is_sret),                   // 新增 sret 标志
         .is_csr(is_csr)
     );
 
@@ -227,7 +229,8 @@ module top (
             id_ex_is_ecall_reg   <= 1'b0;
             id_ex_is_ebreak_reg  <= 1'b0;
             id_ex_is_mret_reg    <= 1'b0;
-        end else if (flush_id_ex || csr_flush) begin   // <-- 修改点2（合并冲刷）
+            id_ex_is_sret_reg    <= 1'b0;   // 新增
+        end else if (flush_id_ex || csr_flush) begin
             // 冲刷时全部清零（插入气泡）
             id_ex_pc_plus4_reg   <= 32'h0;
             id_ex_rs1_data_reg   <= 32'h0;
@@ -253,6 +256,7 @@ module top (
             id_ex_is_ecall_reg   <= 1'b0;
             id_ex_is_ebreak_reg  <= 1'b0;
             id_ex_is_mret_reg    <= 1'b0;
+            id_ex_is_sret_reg    <= 1'b0;   // 新增
         end else if (id_ex_enable) begin
             // 正常更新
             id_ex_pc_plus4_reg   <= if_id_pc_plus4;
@@ -280,6 +284,7 @@ module top (
             id_ex_is_ecall_reg   <= is_ecall;
             id_ex_is_ebreak_reg  <= is_ebreak;
             id_ex_is_mret_reg    <= is_mret;
+            id_ex_is_sret_reg    <= is_sret;   // 新增
         end
     end
 
@@ -360,49 +365,52 @@ module top (
     // 分支目标计算
     assign branch_target = id_ex_pc_plus4 + id_ex_imm;
 
-    // 跳转目标计算（扩展支持异常和 mret）
+    // 跳转目标计算（扩展支持异常、mret 和 sret）
     wire [31:0] jal_target = id_ex_pc_plus4 + id_ex_imm;
     wire [31:0] jalr_target = (alu_src1 + id_ex_imm) & ~32'h1;
     // 在 EX 阶段计算异常 PC
     wire [31:0] exc_pc = id_ex_pc_plus4 - 4;
-    
 
-// 在EX阶段，根据CSR操作类型选择写数据（立即数版本用rs1_addr，否则用alu_src1）
-wire [31:0] csr_wdata;
-assign csr_wdata = (id_ex_is_csr_reg && id_ex_csr_op_reg[2]) ? {27'b0, id_ex_rs1_addr} : alu_src1;
+    // 在EX阶段，根据CSR操作类型选择写数据（立即数版本用rs1_addr，否则用alu_src1）
+    wire [31:0] csr_wdata;
+    assign csr_wdata = (id_ex_is_csr_reg && id_ex_csr_op_reg[2]) ? {27'b0, id_ex_rs1_addr} : alu_src1;
 
-// CSR 模块实例化（扩展后的版本）
-csr csr_inst (
-    .clk(clk),
-    .rst_n(rst_n),
-    .addr(id_ex_csr_addr_reg),
-    .wdata(csr_wdata),
-    .op(id_ex_csr_op_reg),
-    .we(id_ex_is_csr_reg),
-    .rdata(csr_rdata),
-    .ex_ecall(id_ex_is_ecall_reg),
-    .ex_ebreak(id_ex_is_ebreak_reg),
-    .ex_illegal(1'b0),               // 暂时未处理
-    .ex_mret(id_ex_is_mret_reg),
-    .current_pc(exc_pc),
-    .current_instr(32'h0),            // 暂时接地，待完善
-    .inst_retire(1'b0),                // 暂时不计数
-    .trap_taken(csr_take_trap),
-    .trap_pc(csr_trap_pc),
-    .flush_pipeline(csr_flush),
-    .privilege(csr_privilege),
-    .mepc_value(csr_mepc),
-    .int_soft(int_soft),
-    .int_timer(int_timer),
-    .int_ext(int_ext)
-);
+    // CSR 模块实例化（扩展后的版本）
+    csr csr_inst (
+        .clk(clk),
+        .rst_n(rst_n),
+        .addr(id_ex_csr_addr_reg),
+        .wdata(csr_wdata),
+        .op(id_ex_csr_op_reg),
+        .we(id_ex_is_csr_reg),
+        .rdata(csr_rdata),
+        .ex_ecall(id_ex_is_ecall_reg),
+        .ex_ebreak(id_ex_is_ebreak_reg),
+        .ex_illegal(1'b0),               // 暂时未处理
+        .ex_mret(id_ex_is_mret_reg),
+        .ex_sret(id_ex_is_sret_reg),      // 新增 sret 输入
+        .current_pc(exc_pc),
+        .current_instr(32'h0),            // 暂时接地，待完善
+        .inst_retire(1'b0),                // 暂时不计数
+        .trap_taken(csr_take_trap),
+        .trap_pc(csr_trap_pc),
+        .flush_pipeline(csr_flush),
+        .privilege(csr_privilege),
+        .mepc_value(csr_mepc),
+        .sepc_value(csr_sepc),            // 新增 sepc 输出
+        .int_soft(int_soft),
+        .int_timer(int_timer),
+        .int_ext(int_ext)
+    );
 
-    // 跳转控制（整合异常和 mret）
+    // 跳转控制（整合异常、mret 和 sret）
     wire mret_taken = id_ex_is_mret_reg;
+    wire sret_taken = id_ex_is_sret_reg;
     wire trap_taken = csr_take_trap;
 
-    assign jump_taken = id_ex_jal | id_ex_jalr | mret_taken | trap_taken;
+    assign jump_taken = id_ex_jal | id_ex_jalr | mret_taken | sret_taken | trap_taken;
     assign jump_target = trap_taken ? csr_trap_pc :
+                         sret_taken ? csr_sepc :
                          mret_taken ? csr_mepc :
                          id_ex_jalr  ? jalr_target : jal_target;
 

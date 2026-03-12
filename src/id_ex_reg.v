@@ -31,7 +31,7 @@ module id_ex_reg (
     input        is_ecall_i,
     input        is_ebreak_i,
     input        is_mret_i,
-
+    input        is_sret_i,
     // 输出
     output reg [31:0] pc_plus4_o,
     output reg [31:0] rs1_data_o,
@@ -57,7 +57,8 @@ module id_ex_reg (
     output reg        is_csr_o,
     output reg        is_ecall_o,
     output reg        is_ebreak_o,
-    output reg        is_mret_o
+    output reg        is_mret_o,
+    output reg   is_sret_o
 );
 
     always @(posedge clk or negedge rst_n) begin
