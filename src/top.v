@@ -1,10 +1,12 @@
+// top.v
+// 五级流水线 CPU 顶层，集成 MMU 和内存映射定时器
 module top (
-    input clk,
-    input rst_n,
-    input int_soft,
-    input int_timer,
-    input int_ext,
-    output [31:0] pc
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire        int_soft,
+    input  wire        int_timer,
+    input  wire        int_ext,
+    output wire [31:0] pc
 );
     // -------------------- 流水线寄存器信号定义 --------------------
     // IF/ID
@@ -38,7 +40,7 @@ module top (
     reg         id_ex_branch_reg, id_ex_jal_reg, id_ex_jalr_reg;
     reg  [1:0]  id_ex_alu_a_sel_reg;
     reg  [2:0]  id_ex_funct3_reg;
-    wire id_ex_flush, id_ex_enable;
+    wire id_ex_flush;
 
     // EX/MEM
     wire [31:0] ex_mem_alu_result, ex_mem_rs2_data, ex_mem_pc_plus4;
@@ -160,33 +162,103 @@ module top (
         .page_fault (mmu_page_fault)
     );
 
+    // -------------------- 内存映射定时器实例化 --------------------
+    wire        timer_we;
+    wire [31:0] timer_rdata;
+    wire        timer_irq;
+
+    // 定时器基址：0x2000000
+    timer u_timer (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .we       (timer_we),
+        .addr     (ex_mem_alu_result_reg),
+        .wdata    (ex_mem_rs2_data_reg),
+        .rdata    (timer_rdata),
+        .irq_timer(timer_irq)
+    );
+
+    // 判断当前访问是否指向定时器地址范围（0x2000000 - 0x2000FFF）
+    wire is_timer_access = (ex_mem_alu_result_reg >= 32'h20000000 && ex_mem_alu_result_reg < 32'h20001000);
+
+    // 定时器写使能
+    assign timer_we = is_timer_access && ex_mem_mem_write_reg && (mmu_enable ? mmu_done : 1'b1);
+
     // -------------------- 数据存储器连接 --------------------
     wire [31:0] dmem_addr;
     wire        dmem_we;
 
+    // 物理地址选择：分页模式下，如果 MMU 请求读页表，则使用 mmu_mem_addr，否则使用 MMU 结果或直接虚拟地址
     assign dmem_addr = mmu_enable ? 
                        (mmu_mem_req ? mmu_mem_addr :          // 读页表时
                         (mmu_done   ? mmu_paddr :             // 数据访存时
                                       ex_mem_alu_result_reg)) // 未启动 MMU（如 ALU 指令）时，地址任意
                      : ex_mem_alu_result_reg;                 // Bare 模式
 
-    assign dmem_we = mmu_enable ? 
+    assign dmem_we = !is_timer_access && (mmu_enable ? 
                      (mmu_done && !mmu_page_fault ? ex_mem_mem_write_reg : 1'b0)
-                   : ex_mem_mem_write_reg;
+                   : ex_mem_mem_write_reg);
 
+    wire [31:0] dmem_rdata;
     dmem dmem_inst (
         .clk   (clk),
         .we    (dmem_we),
         .addr  (dmem_addr),
         .wdata (ex_mem_rs2_data_reg),
         .funct3(ex_mem_funct3_reg),
-        .rdata (mem_rdata)
+        .rdata (dmem_rdata)
     );
 
-    // -------------------- 修改 ID/EX 使能信号 --------------------
+    // 最终读数据多路选择（定时器或 dmem）
+    assign mem_rdata = is_timer_access ? timer_rdata : dmem_rdata;
+
+    // 将定时器中断连接到 CSR
+    wire int_timer_from_timer = timer_irq;
+
+    // -------------------- CSR 模块实例化 --------------------
+    csr csr_inst (
+        .clk                (clk),
+        .rst_n              (rst_n),
+        .addr               (id_ex_csr_addr_reg),
+        .wdata              (csr_wdata),
+        .op                 (id_ex_csr_op_reg),
+        .we                 (id_ex_is_csr_reg),
+        .rdata              (csr_rdata),
+        .ex_ecall           (id_ex_is_ecall_reg),
+        .ex_ebreak          (id_ex_is_ebreak_reg),
+        .ex_illegal         (1'b0),          // 可连接非法指令检测
+        .ex_page_fault      (mmu_page_fault),
+        .ex_page_fault_addr (ex_mem_alu_result_reg),
+        .is_store           (ex_mem_mem_write_reg),
+        .ex_mret            (id_ex_is_mret_reg),
+        .ex_sret            (id_ex_is_sret_reg),
+        .int_soft           (int_soft),
+        .int_timer          (int_timer_from_timer),
+        .int_ext            (int_ext),
+        .current_pc         (id_ex_pc_plus4 - 4),  // 异常指令 PC = ID/EX PC - 4
+        .current_instr      (32'h0),               // 如需 mtval 可传入
+        .inst_retire        (1'b0),                // 暂未使用
+        .trap_taken         (csr_take_trap),
+        .trap_pc            (csr_trap_pc),
+        .flush_pipeline     (csr_flush),
+        .privilege          (csr_privilege),
+        .satp_value         (csr_satp),
+        .mepc_value         (csr_mepc),
+        .sepc_value         (csr_sepc),
+        .mcause_value       (),
+        .scause_value       (),
+        .mtvec_value        (),
+        .stvec_value        (),
+        .mscratch_value     (),
+        .sscratch_value     (),
+        .mstatus_value      (),
+        .sstatus_value      ()
+    );
+
+    // -------------------- ID/EX 使能信号 --------------------
     wire id_ex_enable = ~mmu_busy;   // MMU 忙碌时停顿 ID/EX
 
-    // -------------------- 其余部分保持不变（从原代码复制）--------------------
+    // -------------------- 其余部分保持不变 --------------------
 
     // PC寄存器
     pc_reg pc_inst (
@@ -200,19 +272,19 @@ module top (
 
     // IF/ID 寄存器
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
+    if (!rst_n) begin
+        if_id_pc_plus4_reg <= 32'h0;
+        if_id_instr_reg    <= 32'h00000013; // 复位时插入 NOP
+    end else if (!stall_if_id) begin
+        if (flush_if_id || csr_flush) begin
             if_id_pc_plus4_reg <= 32'h0;
-            if_id_instr_reg    <= 32'h00000013; // nop
-        end else if (!stall_if_id) begin
-            if (flush_if_id || csr_flush) begin
-                if_id_pc_plus4_reg <= 32'h0;
-                if_id_instr_reg    <= 32'h00000013;
-            end else begin
-                if_id_pc_plus4_reg <= pc + 4;
-                if_id_instr_reg    <= instr;
-            end
+            if_id_instr_reg    <= 32'h00000013; // 冲刷时插入气泡
+        end else begin
+            if_id_pc_plus4_reg <= pc + 4;
+            if_id_instr_reg    <= instr;
         end
     end
+end
     assign if_id_pc_plus4 = if_id_pc_plus4_reg;
     assign if_id_instr    = if_id_instr_reg;
 
@@ -423,47 +495,15 @@ module top (
     assign branch_taken = id_ex_branch & br_taken;
 
     // 分支目标计算
-    assign branch_target = id_ex_pc_plus4 + id_ex_imm;
+    assign branch_target = (id_ex_pc_plus4 - 4) + id_ex_imm;
 
     // 跳转目标计算
-    wire [31:0] jal_target = id_ex_pc_plus4 + id_ex_imm;
+   wire [31:0] jal_target = (id_ex_pc_plus4 - 4) + id_ex_imm;
     wire [31:0] jalr_target = (alu_src1 + id_ex_imm) & ~32'h1;
     wire [31:0] exc_pc = id_ex_pc_plus4 - 4;
 
     // CSR 写数据选择
     wire [31:0] csr_wdata = (id_ex_is_csr_reg && id_ex_csr_op_reg[2]) ? {27'b0, id_ex_rs1_addr} : alu_src1;
-
-    // CSR 模块实例化
-    csr csr_inst (
-        .clk(clk),
-        .rst_n(rst_n),
-        .addr(id_ex_csr_addr_reg),
-        .wdata(csr_wdata),
-        .op(id_ex_csr_op_reg),
-        .we(id_ex_is_csr_reg),
-        .rdata(csr_rdata),
-        .ex_ecall(id_ex_is_ecall_reg),
-        .ex_ebreak(id_ex_is_ebreak_reg),
-        .ex_illegal(1'b0),
-        .ex_mret(id_ex_is_mret_reg),
-        .ex_sret(id_ex_is_sret_reg),
-        .current_pc(exc_pc),
-        .current_instr(32'h0),
-        .inst_retire(1'b0),
-        .trap_taken(csr_take_trap),
-        .trap_pc(csr_trap_pc),
-        .flush_pipeline(csr_flush),
-        .privilege(csr_privilege),
-        .mepc_value(csr_mepc),
-        .sepc_value(csr_sepc),
-        .satp_value(csr_satp),
-        .int_soft(int_soft),
-        .int_timer(int_timer),
-        .int_ext(int_ext),
-        .ex_page_fault(mmu_page_fault),
-        .ex_page_fault_addr(ex_mem_alu_result_reg),
-        .is_store(ex_mem_mem_write_reg)
-    );
 
     // 跳转控制
     wire mret_taken = id_ex_is_mret_reg;
